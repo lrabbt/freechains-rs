@@ -1,5 +1,7 @@
 //! The `freechains` module implements freechains client utilities.
 //!
+//! Main use comes from [Client] struct.
+//!
 //! # Roadmap
 //!
 //! | STATUS   | COMMAND                                                   |
@@ -42,6 +44,8 @@ pub const HOST_VERSION: (u8, u8, u8) = (0, 8, 6);
 
 /// Freechains client.
 ///
+/// Due to freechains server limitations, a new TCP connection is opened for each client request.
+///
 /// # Examples
 ///
 /// List all server chains.
@@ -50,34 +54,37 @@ pub const HOST_VERSION: (u8, u8, u8) = (0, 8, 6);
 /// use freechains::{Client, ClientError};
 ///
 /// # fn main() -> Result<(), ClientError> {
-/// let mut client = Client::connect("0.0.0.0:8300")?;
+/// let mut client = Client::new("0.0.0.0:8300")?;
 /// let chain_ids = client.chains()?;
 ///
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Debug)]
 pub struct Client {
-    stream: TcpStream,
+    addr: SocketAddr,
 }
 
 impl Client {
-    /// Creates a [Client], which connects to freechains server.
-    pub fn connect(addrs: impl ToSocketAddrs) -> io::Result<Client> {
-        let stream = TcpStream::connect(addrs)?;
+    /// Creates a freechains client.
+    pub fn new(addrs: impl ToSocketAddrs) -> io::Result<Client> {
+        let mut addr = addrs.to_socket_addrs()?;
+        let addr = addr
+            .next()
+            .unwrap_or(SocketAddr::from(([0, 0, 0, 0], 8330)));
 
-        Ok(Client { stream })
+        Ok(Client { addr })
     }
 
-    fn write_message(&mut self, msg: &str) -> io::Result<()> {
-        let preamble = format!(
+    fn preamble(&self) -> String {
+        format!(
             "FC v{}.{}.{}",
             HOST_VERSION.0, HOST_VERSION.1, HOST_VERSION.2
-        );
-        writeln!(self.stream, "{} {}", preamble, msg)
+        )
     }
 
-    fn read_message(&self) -> Result<String, ClientError> {
-        let response = BufReader::new(&self.stream)
+    fn read_message(stream: impl Read) -> Result<String, ClientError> {
+        let response = BufReader::new(stream)
             .lines()
             .next()
             .ok_or(ClientError::EmptyResponseError)??;
@@ -97,17 +104,22 @@ impl Client {
 
     /// Requests freechains server for a symmetric encryption for password `pwd`.
     pub fn crypto_shared(&mut self, pwd: &str) -> Result<String, ClientError> {
-        self.write_message(&format!("crypto shared {}", pwd))?;
+        let mut stream = TcpStream::connect(self.addr)?;
 
-        self.read_message()
+        writeln!(stream, "{} crypto shared", self.preamble())?;
+        writeln!(stream, "{}", pwd)?;
+
+        Client::read_message(&stream)
     }
 
     /// Requests freechains server to generate public and private key with password `pwd`.
     pub fn crypto_pubpvt(&mut self, pwd: &str) -> Result<(String, String), ClientError> {
-        let msg = format!("crypto shared {}", pwd);
-        self.write_message(&msg)?;
+        let mut stream = TcpStream::connect(self.addr)?;
 
-        let line = self.read_message()?;
+        writeln!(stream, "{} crypto pubpvt", self.preamble())?;
+        writeln!(stream, "{}", pwd)?;
+
+        let line = Client::read_message(&stream)?;
 
         let mut split_line = line.split(" ");
         let pubkey = String::from(split_line.next().ok_or(ClientError::ExecutionError(
@@ -122,9 +134,11 @@ impl Client {
 
     /// Requests freechains server for a list of subscribed chains.
     pub fn chains(&mut self) -> Result<ChainsIds, ClientError> {
-        self.write_message("chains list")?;
+        let mut stream = TcpStream::connect(self.addr)?;
 
-        let line = self.read_message()?;
+        writeln!(stream, "{} chains list", self.preamble())?;
+
+        let line = Client::read_message(&stream)?;
         let chains: Result<Vec<_>, _> = line.split(' ').map(ChainId::new).collect();
         let chains = chains?;
 
@@ -136,10 +150,17 @@ impl Client {
     ///
     /// Returns created chain hash.
     pub fn join_chain(&mut self, chain: &ChainId, keys: &[&str]) -> Result<String, ClientError> {
-        let msg = format!("chains join {} {}", chain, keys.join(" "));
-        self.write_message(&msg)?;
+        let mut stream = TcpStream::connect(self.addr)?;
 
-        let hash = self.read_message()?;
+        writeln!(
+            stream,
+            "{} chains join {} {}",
+            self.preamble(),
+            chain,
+            keys.join(" ")
+        )?;
+
+        let hash = Client::read_message(&stream)?;
 
         Ok(hash)
     }
@@ -165,7 +186,7 @@ impl Client {
 /// # use freechains::{Client, ChainId, ClientError};
 ///
 /// # fn main() -> Result<(), ClientError> {
-/// let mut client = Client::connect("0.0.0.0:8300")?;
+/// let mut client = Client::new("0.0.0.0:8300")?;
 /// let chain_id = ChainId::new("$chat")?;
 ///
 /// let mut client = client.chain(&chain_id);
@@ -185,14 +206,12 @@ impl<'a> ChainClient<'a> {
         ChainClient { client, name }
     }
 
-    fn write_message(&mut self, msg: &str) -> io::Result<()> {
-        let msg = format!("chain {}", msg);
-        self.client.write_message(&msg)
+    fn preamble(&self) -> String {
+        format!("{} chain {}", self.client.preamble(), self.name)
     }
 
-    fn read_message(&self) -> Result<String, ClientError> {
-        let response = self.client.read_message();
-        response
+    fn read_message(stream: &TcpStream) -> Result<String, ClientError> {
+        Client::read_message(stream)
     }
 
     /// Returns chain name.
@@ -202,31 +221,46 @@ impl<'a> ChainClient<'a> {
 
     /// Requests freechains server to leave chain.
     pub fn leave(self) -> Result<bool, ClientError> {
-        let msg = format!("chains leave {}", self.name);
-        self.client.write_message(&msg)?;
+        let mut stream = TcpStream::connect(self.client.addr)?;
 
-        Ok(self.read_message()? == "true")
+        writeln!(
+            stream,
+            "{} chains leave {}",
+            self.client.preamble(),
+            self.name
+        )?;
+
+        Ok(Client::read_message(&stream)? == "true")
     }
 
     /// Requests freechains for the hash of genesis.
     pub fn genesis(&mut self) -> Result<String, ClientError> {
-        self.write_message("genesis")?;
+        let mut stream = TcpStream::connect(self.client.addr)?;
 
-        let response = self.read_message()?;
+        writeln!(stream, "{} genesis", self.preamble())?;
+
+        let response = ChainClient::read_message(&stream)?;
         Ok(response)
     }
 
     /// Requests freechains server for a payload for the specified post. Post must be identified by
     /// its hash.
     pub fn payload(&mut self, hash: &str, pvtkey: Option<&str>) -> Result<Vec<u8>, ClientError> {
-        let pvtkey = pvtkey.unwrap_or("null");
-        let msg = format!("get payload {} {}", hash, pvtkey);
-        self.write_message(&msg)?;
+        let mut stream = TcpStream::connect(self.client.addr)?;
 
-        let payload_size = self.read_message()?.parse()?;
+        let pvtkey = pvtkey.unwrap_or("null");
+        writeln!(
+            stream,
+            "{} get payload {} {}",
+            self.preamble(),
+            hash,
+            pvtkey
+        )?;
+
+        let payload_size = ChainClient::read_message(&stream)?.parse()?;
 
         let mut buf = [0, payload_size];
-        self.client.stream.read_exact(&mut buf)?;
+        stream.read_exact(&mut buf)?;
 
         Ok(buf.to_vec())
     }
@@ -237,14 +271,15 @@ impl<'a> ChainClient<'a> {
         hash: &str,
         pvtkey: Option<&str>,
     ) -> Result<ContentBlock, ClientError> {
-        let pvtkey = pvtkey.unwrap_or("null");
-        let msg = format!("get block {} {}", hash, pvtkey);
-        self.write_message(&msg)?;
+        let mut stream = TcpStream::connect(self.client.addr)?;
 
-        let block_size = self.read_message()?.parse()?;
+        let pvtkey = pvtkey.unwrap_or("null");
+        writeln!(stream, "{} get block {} {}", self.preamble(), hash, pvtkey)?;
+
+        let block_size = ChainClient::read_message(&stream)?.parse()?;
 
         let mut buf = [0, block_size];
-        self.client.stream.read_exact(&mut buf)?;
+        stream.read_exact(&mut buf)?;
 
         let content: ContentBlock = serde_json::from_slice(&buf)?;
 
@@ -252,30 +287,42 @@ impl<'a> ChainClient<'a> {
     }
 
     /// Requests freechains server to post a message.
+    ///
+    /// Returns message hash.
     pub fn post(
         &mut self,
         signature: Option<&str>,
         encrypt: bool,
         payload: &[u8],
     ) -> Result<String, ClientError> {
+        let mut stream = TcpStream::connect(self.client.addr)?;
+
         let signature = signature.unwrap_or("anon");
-        let msg = format!("post {} {} {}", signature, encrypt, payload.len());
-        self.write_message(&msg)?;
+        writeln!(
+            stream,
+            "{} post {} {} {}",
+            self.preamble(),
+            signature,
+            encrypt,
+            payload.len()
+        )?;
 
-        self.client.stream.write_all(payload)?;
+        stream.write_all(payload)?;
 
-        self.read_message()
+        ChainClient::read_message(&stream)
     }
 
     /// Requests freechains server to get chain heads.
     pub fn heads(&mut self, blocked: bool) -> Result<Vec<String>, ClientError> {
+        let mut stream = TcpStream::connect(self.client.addr)?;
+
         let mut msg = String::from("heads");
         if blocked {
             msg = format!("{} blocked", msg);
         }
-        self.write_message(&msg)?;
+        writeln!(stream, "{} {}", self.preamble(), &msg)?;
 
-        let response = self.read_message()?;
+        let response = ChainClient::read_message(&stream)?;
         let hashes = response.split(' ').map(String::from).collect();
 
         Ok(hashes)
@@ -284,10 +331,16 @@ impl<'a> ChainClient<'a> {
     /// Requests freechains server to traverse all messages hashes starting with required messages
     /// hashes.
     pub fn traverse(&mut self, up_blocks: &[&str]) -> Result<Vec<String>, ClientError> {
-        let msg = format!("traverse {}", up_blocks.join(" "));
-        self.write_message(&msg)?;
+        let mut stream = TcpStream::connect(self.client.addr)?;
 
-        let response = self.read_message()?;
+        writeln!(
+            stream,
+            "{} traverse {}",
+            self.preamble(),
+            up_blocks.join(" ")
+        )?;
+
+        let response = ChainClient::read_message(&stream)?;
         let hashes = response.split(' ').map(String::from).collect();
 
         Ok(hashes)
@@ -295,10 +348,11 @@ impl<'a> ChainClient<'a> {
 
     /// Requests freechains server for content reputation.
     pub fn reputation(&mut self, hash: &str) -> Result<usize, ClientError> {
-        let msg = format!("reps {}", hash);
-        self.write_message(&msg)?;
+        let mut stream = TcpStream::connect(self.client.addr)?;
 
-        let response = self.read_message()?;
+        writeln!(stream, "{} reps {}", self.preamble(), hash)?;
+
+        let response = ChainClient::read_message(&stream)?;
         let reputation = response.parse()?;
 
         Ok(reputation)
@@ -306,11 +360,19 @@ impl<'a> ChainClient<'a> {
 
     /// Requests freechains server to give content a like.
     pub fn like(&mut self, hash: &str, pvtkey: &str, reason: &[u8]) -> Result<String, ClientError> {
-        let msg = format!("like 1 {} {} {}", hash, pvtkey, reason.len());
-        self.write_message(&msg)?;
-        self.client.stream.write_all(reason)?;
+        let mut stream = TcpStream::connect(self.client.addr)?;
 
-        let hash = self.read_message()?;
+        writeln!(
+            stream,
+            "{} like 1 {} {} {}",
+            self.preamble(),
+            hash,
+            pvtkey,
+            reason.len()
+        )?;
+        stream.write_all(reason)?;
+
+        let hash = ChainClient::read_message(&stream)?;
 
         Ok(hash)
     }
@@ -322,11 +384,19 @@ impl<'a> ChainClient<'a> {
         pvtkey: &str,
         reason: &[u8],
     ) -> Result<String, ClientError> {
-        let msg = format!("like -1 {} {} {}", hash, pvtkey, reason.len());
-        self.write_message(&msg)?;
-        self.client.stream.write_all(reason)?;
+        let mut stream = TcpStream::connect(self.client.addr)?;
 
-        let hash = self.read_message()?;
+        writeln!(
+            stream,
+            "{} like -1 {} {} {}",
+            self.preamble(),
+            hash,
+            pvtkey,
+            reason.len()
+        )?;
+        stream.write_all(reason)?;
+
+        let hash = ChainClient::read_message(&stream)?;
 
         Ok(hash)
     }
@@ -354,7 +424,7 @@ impl fmt::Debug for ChainClient<'_> {
 /// use freechains::{Client, ClientError};
 ///
 /// # fn main() -> Result<(), ClientError> {
-/// let mut client = Client::connect("host1:8330")?;
+/// let mut client = Client::new("host1:8330")?;
 /// let mut client = client.peer("host2:8330")?;
 /// let chains = client.chains()?;
 ///
@@ -374,43 +444,53 @@ impl<'a> PeerClient<'a> {
         Ok(PeerClient { client, peer })
     }
 
-    fn write_message(&mut self, msg: &str) -> io::Result<()> {
-        let msg = format!("peer {}:{} {}", self.peer.ip(), self.peer.port(), msg);
-        self.client.write_message(&msg)
+    fn preamble(&self) -> String {
+        format!(
+            "{} peer {}:{}",
+            self.client.preamble(),
+            self.peer.ip(),
+            self.peer.port()
+        )
     }
 
     /// Requests freechains server to send chain to other freechains peer.
     pub fn send_chain(&mut self, id: &ChainId) -> Result<(), ClientError> {
-        let msg = format!("send {}", id);
-        self.write_message(&msg)?;
+        let mut stream = TcpStream::connect(self.client.addr)?;
 
-        self.client.read_message()?;
+        writeln!(stream, "{} send {}", self.preamble(), id)?;
+
+        Client::read_message(&stream)?;
 
         Ok(())
     }
 
     /// Requests freechains server to receive chain from other freechains peer.
     pub fn receive_chain(&mut self, id: &ChainId) -> Result<(), ClientError> {
-        let msg = format!("recv {}", id);
-        self.write_message(&msg)?;
+        let mut stream = TcpStream::connect(self.client.addr)?;
 
-        self.client.read_message()?;
+        writeln!(stream, "{} recv {}", self.preamble(), id)?;
+
+        Client::read_message(&stream)?;
 
         Ok(())
     }
 
     /// Requests freechains server to ping other freechains peer.
     pub fn ping(&mut self) -> Result<(), ClientError> {
-        self.write_message("ping")?;
-        self.client.read_message()?;
+        let mut stream = TcpStream::connect(self.client.addr)?;
+
+        writeln!(stream, "{} ping", self.preamble())?;
+        Client::read_message(&stream)?;
         Ok(())
     }
 
     /// Requests freechains server to request other freechains peer for their chains.
     pub fn chains(&mut self) -> Result<ChainsIds, ClientError> {
-        self.write_message("chains")?;
+        let mut stream = TcpStream::connect(self.client.addr)?;
 
-        let response = self.client.read_message()?;
+        writeln!(stream, "{} chains", self.preamble())?;
+
+        let response = Client::read_message(&stream)?;
         let chains: Result<Vec<_>, _> = response.split(' ').map(ChainId::new).collect();
         let chains = chains?;
 
