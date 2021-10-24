@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Freechains client library for rust."
 edition = "2018"
 repository = "https://github.com/lrabbt/freechains-rs"
+homepage = "https://github.com/lrabbt/freechains-rs"
 license = "MIT"
 authors = [ "Breno Brandão <lrabbt@gmail.com>" ]
 
