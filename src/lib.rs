@@ -850,3 +850,507 @@ fn parse_server_message(msg: &str) -> Result<String, ClientError> {
 
     Ok(String::from(msg))
 }
+
+#[cfg(test)]
+mod test {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct ConnectorMock(ConnectionMock);
+
+    impl ConnectorMock {
+        fn new() -> ConnectorMock {
+            ConnectorMock(ConnectionMock::new())
+        }
+
+        fn read_stream(&self) -> Rc<RefCell<Vec<u8>>> {
+            self.0.read_stream()
+        }
+    }
+
+    impl Connect for ConnectorMock {
+        fn connect(&self) -> io::Result<Box<dyn ReadWrite>> {
+            Ok(Box::new(self.0.clone()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ConnectionMock {
+        read_stream: Rc<RefCell<Vec<u8>>>,
+        write_stream: Rc<RefCell<Vec<u8>>>,
+    }
+
+    impl ConnectionMock {
+        fn new() -> ConnectionMock {
+            let read_stream = Rc::new(RefCell::new(Vec::new()));
+            let write_stream = Rc::new(RefCell::new(Vec::new()));
+
+            ConnectionMock {
+                read_stream,
+                write_stream,
+            }
+        }
+
+        fn read_stream(&self) -> Rc<RefCell<Vec<u8>>> {
+            Rc::clone(&self.read_stream)
+        }
+    }
+
+    impl ReadWrite for ConnectionMock {}
+
+    impl Read for ConnectionMock {
+        fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+            let mut read_stream = self.read_stream.borrow_mut();
+            let mut a: &[u8] = read_stream.as_ref();
+
+            let size = a.read(b)?;
+            read_stream.drain(..size);
+            Ok(size)
+        }
+    }
+
+    impl Write for ConnectionMock {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            let mut a = self.write_stream.borrow_mut();
+            a.write(b)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Clone for ConnectionMock {
+        fn clone(&self) -> Self {
+            let read_stream = Rc::clone(&self.read_stream);
+            let write_stream = Rc::clone(&self.write_stream);
+
+            ConnectionMock {
+                read_stream,
+                write_stream,
+            }
+        }
+    }
+
+    #[test]
+    fn crypto_shared() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let response = b"707E8334560C3FB2852CCCE11F9221FA3594B7DE3919A8BAA5B6DB90FE432E53\n";
+        w.replace(response.to_vec());
+        let hash = client.crypto_shared("pwd")?;
+
+        assert_eq!(hash.as_bytes(), &response[..response.len() - 1]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn crypto_pubpvt() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let response = b"646AABC0D78E87574FFCD2E98FF14B08C76D424C7A0ED783CB7B840117A403E3 \
+                       707E8334560C3FB2852CCCE11F9221FA3594B7DE3919A8BAA5B6DB90FE432E53646AABC0D78E87574FFCD2E98FF14B08C76D424C7A0ED783CB7B840117A403E3\n";
+        w.replace(response.to_vec());
+        let (pubkey, pvtkey) = client.crypto_pubpvt("pwd")?;
+
+        let exp_pubkey = "646AABC0D78E87574FFCD2E98FF14B08C76D424C7A0ED783CB7B840117A403E3";
+        assert_eq!(pubkey, exp_pubkey);
+
+        let exp_pvtkey = "707E8334560C3FB2852CCCE11F9221FA3594B7DE3919A8BAA5B6DB90FE432E53646AABC0D78E87574FFCD2E98FF14B08C76D424C7A0ED783CB7B840117A403E3";
+        assert_eq!(pvtkey, exp_pvtkey);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chains_join() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let chain_id = ChainId::new("$chat")?;
+        let pwd_hash = "707E8334560C3FB2852CCCE11F9221FA3594B7DE3919A8BAA5B6DB90FE432E53";
+
+        let response = b"3E56AE4D17484398F7694C75EA6D3F9FD31C756574B4346D0BA40FB36DAB4501\n";
+        w.replace(response.to_vec());
+        let hash = client.join_chain(&chain_id, &[pwd_hash])?;
+
+        let exp_hash = &response[..response.len() - 1];
+        assert_eq!(hash.as_bytes(), exp_hash);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chains_list() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let response = b"$chain1 $chain2 #chain3 @chain4\n";
+        w.replace(response.to_vec());
+        let chains = client.chains()?;
+
+        let exp_chains: Result<Vec<_>, _> = std::str::from_utf8(&response[..response.len() - 1])
+            .unwrap()
+            .split(' ')
+            .map(ChainId::new)
+            .collect();
+        let exp_chains = exp_chains?;
+        assert_eq!(chains, exp_chains);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chain_leave() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let chain_id = ChainId::new("$chat").unwrap();
+
+        let response = b"true\n";
+        w.replace(response.to_vec());
+        let left = client.chain(&chain_id).leave()?;
+
+        assert_eq!(left, true);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chain_leave_failed() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let chain_id = ChainId::new("$chat").unwrap();
+
+        let response = b"false\n";
+        w.replace(response.to_vec());
+        let left = client.chain(&chain_id).leave()?;
+
+        assert_eq!(left, false);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chain_genesis() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let chain_id = ChainId::new("$chat").unwrap();
+
+        let response = b"0_3E56AE4D17484398F7694C75EA6D3F9FD31C756574B4346D0BA40FB36DAB4501\n";
+        w.replace(response.to_vec());
+        let genesis = client.chain(&chain_id).genesis()?;
+
+        let exp_genesis = &response[..response.len() - 1];
+        assert_eq!(genesis.as_bytes(), exp_genesis);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chain_heads() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let chain_id = ChainId::new("$chat").unwrap();
+
+        let response = b"1_B8AAB63B4CC2129443F0BEA3F1A7FB16C193FE92C3DB2245EB9062EB07A47159 \
+                       2_30F9ABD1FDB2DF44CAF47743AE01FD768B1C2B1952B74A761F32E13D5483BE0E\n";
+        w.replace(response.to_vec());
+        let heads = client.chain(&chain_id).heads(false)?;
+
+        let exp_heads: Vec<_> = std::str::from_utf8(&response[..response.len() - 1])
+            .unwrap()
+            .split(' ')
+            .map(String::from)
+            .collect();
+        assert_eq!(heads, exp_heads);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chain_payload() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let chain_id = ChainId::new("$chat").unwrap();
+
+        let response = b"17\nhello,\nok message";
+        w.replace(response.to_vec());
+        let payload = client.chain(&chain_id).payload("some_hash", None)?;
+        let payload = std::str::from_utf8(&payload)?;
+
+        let exp_payload = std::str::from_utf8(response)
+            .unwrap()
+            .split_once('\n')
+            .unwrap()
+            .1;
+        assert_eq!(payload, exp_payload);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chain_content_block() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let chain_id = ChainId::new("$chat").unwrap();
+        let response = br#"710
+{
+    "hash": "2_3D9997F5D8A57B26B7DEC3BCDFD3A12EAE48C585DFC287FE9DE522E44A96DB46",
+    "time": 1635174995341,
+    "pay": {
+        "crypt": false,
+        "hash": "FD7B3E075AB7E245506323F1D1B55330CCD606FB3301F4CABA25022A1DE50B47"
+    },
+    "like": {
+        "n": 1,
+        "hash": "1_59C6AA0E3B3650D44D27EB8EF3645ECFC69A1B78F0DAA74A2B89167538749103"
+    },
+    "sign": {
+        "hash": "9EB2D4CB0AC67B35B78B545E4AB3410DC82E6D0778DECFC80C83A13BEAD05F7B83D5B8B6CE67AB7EF9E0CA09FA489AE88FB0D126C522A0ED4E2C5BF939901205",
+        "pub": "197154707DAF7953BE0EBB7BBE29FA1AECA402505E9ED00BCAF189EB6A32FCE8"
+    },
+    "backs": [
+        "1_59C6AA0E3B3650D44D27EB8EF3645ECFC69A1B78F0DAA74A2B89167538749103"
+    ]
+}"#;
+
+        w.replace(response.to_vec());
+        let content = client.chain(&chain_id).content("some_hash", None)?;
+
+        let exp_content = ContentBlock {
+            hash: "2_3D9997F5D8A57B26B7DEC3BCDFD3A12EAE48C585DFC287FE9DE522E44A96DB46".to_string(),
+            time: 1635174995341,
+            payload: Some(PayloadBlock {
+                crypt: false,
+                hash: "FD7B3E075AB7E245506323F1D1B55330CCD606FB3301F4CABA25022A1DE50B47"
+                    .to_string(),
+            }),
+            like: Some(LikeBlock {
+                n: 1,
+                hash: "1_59C6AA0E3B3650D44D27EB8EF3645ECFC69A1B78F0DAA74A2B89167538749103"
+                    .to_string(),
+            }),
+            signature: Some(SignatureBlock {
+                hash:"9EB2D4CB0AC67B35B78B545E4AB3410DC82E6D0778DECFC80C83A13BEAD05F7B83D5B8B6CE67AB7EF9E0CA09FA489AE88FB0D126C522A0ED4E2C5BF939901205".to_string(),
+        pubkey: "197154707DAF7953BE0EBB7BBE29FA1AECA402505E9ED00BCAF189EB6A32FCE8".to_string(),
+            }),
+            backs: vec![
+        "1_59C6AA0E3B3650D44D27EB8EF3645ECFC69A1B78F0DAA74A2B89167538749103".to_string()],
+        };
+        assert_eq!(content, exp_content);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chain_post() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let chain_id = ChainId::new("$chat").unwrap();
+
+        let response = b"3_9B144EE0518E5DE01D4C1AABD469D85315715CB15F77AB4B3D87D7802EE970E6\n";
+        w.replace(response.to_vec());
+        let hash = client.chain(&chain_id).post(None, false, b"payload")?;
+
+        let exp_hash = std::str::from_utf8(&response[..response.len() - 1]).unwrap();
+        assert_eq!(hash, exp_hash);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chain_like() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let chain_id = ChainId::new("$chat").unwrap();
+
+        let response = b"2_3D9997F5D8A57B26B7DEC3BCDFD3A12EAE48C585DFC287FE9DE522E44A96DB46\n";
+        w.replace(response.to_vec());
+
+        let fake_hash = "1_9B144EE0518E5DE01D4C1AABD469D85315715CB15F77AB4B3D87D7802EE970E6";
+        let hash = client
+            .chain(&chain_id)
+            .like(&fake_hash, "pvt_key", b"i liked it")?;
+
+        let exp_hash = std::str::from_utf8(&response[..response.len() - 1]).unwrap();
+        assert_eq!(hash, exp_hash);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chain_dislike() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let chain_id = ChainId::new("$chat").unwrap();
+
+        let response = b"2_3D9997F5D8A57B26B7DEC3BCDFD3A12EAE48C585DFC287FE9DE522E44A96DB46\n";
+        w.replace(response.to_vec());
+
+        let fake_hash = "1_9B144EE0518E5DE01D4C1AABD469D85315715CB15F77AB4B3D87D7802EE970E6";
+        let hash = client
+            .chain(&chain_id)
+            .dislike(&fake_hash, "pvt_key", b"i liked it")?;
+
+        let exp_hash = std::str::from_utf8(&response[..response.len() - 1]).unwrap();
+        assert_eq!(hash, exp_hash);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chain_reputation() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let chain_id = ChainId::new("$chat").unwrap();
+
+        let response = b"18\n";
+        w.replace(response.to_vec());
+
+        let fake_hash = "1_9B144EE0518E5DE01D4C1AABD469D85315715CB15F77AB4B3D87D7802EE970E6";
+        let reps = client.chain(&chain_id).reputation(&fake_hash)?;
+
+        let exp_reps = 18;
+        assert_eq!(reps, exp_reps);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chain_traverse() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let chain_id = ChainId::new("$chat").unwrap();
+
+        let response = b"1_B8AAB63B4CC2129443F0BEA3F1A7FB16C193FE92C3DB2245EB9062EB07A47159 \
+                       2_30F9ABD1FDB2DF44CAF47743AE01FD768B1C2B1952B74A761F32E13D5483BE0E \
+                       3_3D9997F5D8A57B26B7DEC3BCDFD3A12EAE48C585DFC287FE9DE522E44A96DB46\n";
+        w.replace(response.to_vec());
+
+        let fake_hash = "0_9B144EE0518E5DE01D4C1AABD469D85315715CB15F77AB4B3D87D7802EE970E6";
+        let hashes = client.chain(&chain_id).traverse(&[fake_hash])?;
+
+        let exp_hahses: Vec<_> = std::str::from_utf8(&response[..response.len() - 1])
+            .unwrap()
+            .split(' ')
+            .map(String::from)
+            .collect();
+        assert_eq!(hashes, exp_hahses);
+
+        Ok(())
+    }
+
+    #[test]
+    fn peer_ping() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let fake_peer = "1.2.3.4:8330";
+
+        let response = b"10\n";
+        w.replace(response.to_vec());
+
+        let ping = client.peer(&fake_peer)?.ping()?;
+
+        let exp_ping = 10;
+        assert_eq!(ping, exp_ping);
+
+        Ok(())
+    }
+
+    #[test]
+    fn peer_chains_list() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let fake_peer = "1.2.3.4:8330";
+
+        let response = b"$chain1 $chain2 #chain3 @chain4\n";
+        w.replace(response.to_vec());
+        let chains = client.peer(&fake_peer)?.chains()?;
+
+        let exp_chains: Result<Vec<_>, _> = std::str::from_utf8(&response[..response.len() - 1])
+            .unwrap()
+            .split(' ')
+            .map(ChainId::new)
+            .collect();
+        let exp_chains = exp_chains?;
+        assert_eq!(chains, exp_chains);
+
+        Ok(())
+    }
+
+    #[test]
+    fn peer_send() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let fake_peer = "1.2.3.4:8330";
+        let chain_id = ChainId::new("#forum").unwrap();
+
+        let response = b"5 / 8\n";
+        w.replace(response.to_vec());
+
+        let sent = client.peer(&fake_peer)?.send_chain(&chain_id)?;
+
+        let exp_sent = (5, 8);
+        assert_eq!(sent, exp_sent);
+
+        Ok(())
+    }
+
+    #[test]
+    fn peer_receive() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let mut client = Client::new(mock);
+
+        let fake_peer = "1.2.3.4:8330";
+        let chain_id = ChainId::new("#forum").unwrap();
+
+        let response = b"5 / 8\n";
+        w.replace(response.to_vec());
+
+        let received = client.peer(&fake_peer)?.receive_chain(&chain_id)?;
+
+        let exp_received = (5, 8);
+        assert_eq!(received, exp_received);
+
+        Ok(())
+    }
+}
