@@ -2,6 +2,45 @@
 //!
 //! Main use comes from [Client] struct.
 //!
+//! # Examples
+//!
+//! List all server chains.
+//!
+//! ```no_run
+//! use freechains::{Client, ClientError};
+//!
+//! # fn main() -> Result<(), ClientError> {
+//! let mut client = Client::new("0.0.0.0:8300");
+//! let chain_ids = client.chains()?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Join and post on a public chain.
+//!
+//! ```no_run
+//! use freechains::{Client, ChainId, ClientError};
+//!
+//! # fn main() -> Result<(), ClientError> {
+//! let mut client = Client::new("0.0.0.0:8300");
+//!
+//! // Join public chain
+//! let chain_id = ChainId::new("#forum")?;
+//! # let chain_pubkey1 = "";
+//! # let chain_pubkey2 = "";
+//! client.join_chain(&chain_id, &[chain_pubkey1, chain_pubkey2])?;
+//!
+//! // Generate public and private keys
+//! let (pubkey, pvtkey) = client.crypto_pubpvt("strong_password")?;
+//!
+//! let mut chain_client = client.chain(&chain_id);
+//!
+//! // Post on public chain
+//! chain_client.post(Some(&pvtkey), false, b"Hello, forum!")?;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Roadmap
 //!
 //! | STATUS   | COMMAND                                                   |
@@ -29,7 +68,7 @@
 
 #![warn(missing_docs)]
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use std::convert::TryFrom;
 use std::error::Error;
@@ -90,40 +129,21 @@ where
     }
 }
 
-// impl TryFrom<&dyn ToSocketAddrs<Iter = option::IntoIter<SocketAddr>>> for TcpStreamConnector {
-//     type Error = io::Error;
-
-//     fn try_from(
-//         s: &dyn ToSocketAddrs<Iter = option::IntoIter<SocketAddr>>,
-//     ) -> Result<Self, io::Error> {
-//         let mut addr = s.to_socket_addrs()?;
-//         let addr = addr
-//             .next()
-//             .unwrap_or(SocketAddr::try_from(([0, 0, 0, 0], 8330)).unwrap());
-//         Ok(TcpStreamConnector { addr })
-//     }
-// }
-
 /// Freechains host version supported.
 pub const HOST_VERSION: (u8, u8, u8) = (0, 8, 6);
 
-/// Freechains client.
+/// Freechains client. For more usage examples, check [module documentation](self),
 ///
 /// Due to freechains server limitations, a new TCP connection is opened for each client request.
 ///
 /// # Examples
 ///
-/// List all server chains.
+/// Create client from [str].
 ///
-/// ```no_run
-/// use freechains::{Client, ClientError};
+/// ```
+/// use freechains::Client;
 ///
-/// # fn main() -> Result<(), ClientError> {
-/// let mut client = Client::new("0.0.0.0:8300");
-/// let chain_ids = client.chains()?;
-///
-/// # Ok(())
-/// # }
+/// let client = Client::new("0.0.0.0:8330");
 /// ```
 #[derive(Debug)]
 pub struct Client<T> {
@@ -146,25 +166,6 @@ where
         )
     }
 
-    fn read_message(&self, stream: impl Read) -> Result<String, ClientError> {
-        let response = BufReader::new(stream)
-            .lines()
-            .next()
-            .ok_or(ClientError::EmptyResponseError)??;
-
-        let mut chars = response.chars();
-
-        let first_char = chars.next();
-        if let Some(c) = first_char {
-            if c == '!' {
-                chars.next();
-                return Err(ClientError::ExecutionError(chars.collect()));
-            }
-        }
-
-        Ok(String::from(response))
-    }
-
     /// Requests freechains server for a symmetric encryption for password `pwd`.
     pub fn crypto_shared(&mut self, pwd: &str) -> Result<String, ClientError> {
         let mut stream = self.connector.connect()?;
@@ -172,7 +173,9 @@ where
         writeln!(stream, "{} crypto shared", self.preamble())?;
         writeln!(stream, "{}", pwd)?;
 
-        self.read_message(&mut stream)
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        parse_server_message(&line)
     }
 
     /// Requests freechains server to generate public and private key with password `pwd`.
@@ -182,7 +185,9 @@ where
         writeln!(stream, "{} crypto pubpvt", self.preamble())?;
         writeln!(stream, "{}", pwd)?;
 
-        let line = self.read_message(&mut stream)?;
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let line = parse_server_message(&line)?;
 
         let mut split_line = line.split(" ");
         let pubkey = String::from(split_line.next().ok_or(ClientError::ExecutionError(
@@ -201,15 +206,17 @@ where
 
         writeln!(stream, "{} chains list", self.preamble())?;
 
-        let line = self.read_message(&mut stream)?;
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let line = parse_server_message(&line)?;
+
         let chains: Result<Vec<_>, _> = line.split(' ').map(ChainId::new).collect();
         let chains = chains?;
 
         Ok(chains)
     }
 
-    /// Requests freechains server to join private chain with creators defined by keys. Chain name
-    /// must start with "$".
+    /// Requests freechains server to join private chain with creators defined by keys.
     ///
     /// Returns created chain hash.
     pub fn join_chain(&mut self, chain: &ChainId, keys: &[&str]) -> Result<String, ClientError> {
@@ -223,7 +230,9 @@ where
             keys.join(" ")
         )?;
 
-        let hash = self.read_message(&mut stream)?;
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let hash = parse_server_message(&line)?;
 
         Ok(hash)
     }
@@ -276,10 +285,6 @@ where
         format!("{} chain {}", self.client.preamble(), self.name)
     }
 
-    fn read_message(&self, stream: impl Read) -> Result<String, ClientError> {
-        self.client.read_message(stream)
-    }
-
     /// Returns chain name.
     pub fn name(&self) -> &str {
         &self.name
@@ -296,7 +301,12 @@ where
             self.name
         )?;
 
-        Ok(self.read_message(&mut stream)? == "true")
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let line = parse_server_message(&line)?;
+        let left = line == "true";
+
+        Ok(left)
     }
 
     /// Requests freechains for the hash of genesis.
@@ -305,8 +315,9 @@ where
 
         writeln!(stream, "{} genesis", self.preamble())?;
 
-        let response = self.read_message(&mut stream)?;
-        Ok(response)
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        parse_server_message(&line)
     }
 
     /// Requests freechains server for a payload for the specified post. Post must be identified by
@@ -323,10 +334,13 @@ where
             pvtkey
         )?;
 
-        let payload_size = self.read_message(&mut stream)?.parse()?;
+        let mut r = BufReader::new(stream);
+        let payload_size = read_utf8_line(&mut r)?;
+        let payload_size = parse_server_message(&payload_size)?;
+        let payload_size = payload_size.parse()?;
 
-        let mut buf = [0, payload_size];
-        stream.read_exact(&mut buf)?;
+        let mut buf = vec![0; payload_size];
+        r.read_exact(&mut buf)?;
 
         Ok(buf.to_vec())
     }
@@ -342,10 +356,13 @@ where
         let pvtkey = pvtkey.unwrap_or("null");
         writeln!(stream, "{} get block {} {}", self.preamble(), hash, pvtkey)?;
 
-        let block_size = self.read_message(&mut stream)?.parse()?;
+        let mut r = BufReader::new(stream);
+        let block_size = read_utf8_line(&mut r)?;
+        let block_size = parse_server_message(&block_size)?;
+        let block_size = block_size.parse()?;
 
-        let mut buf = [0, block_size];
-        stream.read_exact(&mut buf)?;
+        let mut buf = vec![0; block_size];
+        r.read_exact(&mut buf)?;
 
         let content: ContentBlock = serde_json::from_slice(&buf)?;
 
@@ -375,7 +392,9 @@ where
 
         stream.write_all(payload)?;
 
-        self.read_message(&mut stream)
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        parse_server_message(&line)
     }
 
     /// Requests freechains server to get chain heads.
@@ -388,7 +407,9 @@ where
         }
         writeln!(stream, "{} {}", self.preamble(), &msg)?;
 
-        let response = self.read_message(&mut stream)?;
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let response = parse_server_message(&line)?;
         let hashes = response.split(' ').map(String::from).collect();
 
         Ok(hashes)
@@ -406,19 +427,25 @@ where
             up_blocks.join(" ")
         )?;
 
-        let response = self.read_message(&mut stream)?;
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let response = parse_server_message(&line)?;
         let hashes = response.split(' ').map(String::from).collect();
 
         Ok(hashes)
     }
 
     /// Requests freechains server for content reputation.
+    ///
+    /// Accepts either a post hash, or an user public key.
     pub fn reputation(&mut self, hash: &str) -> Result<usize, ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         writeln!(stream, "{} reps {}", self.preamble(), hash)?;
 
-        let response = self.read_message(&mut stream)?;
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let response = parse_server_message(&line)?;
         let reputation = response.parse()?;
 
         Ok(reputation)
@@ -438,9 +465,9 @@ where
         )?;
         stream.write_all(reason)?;
 
-        let hash = self.read_message(&mut stream)?;
-
-        Ok(hash)
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        parse_server_message(&line)
     }
 
     /// Requests freechains server to give content a dislike.
@@ -462,9 +489,9 @@ where
         )?;
         stream.write_all(reason)?;
 
-        let hash = self.read_message(&mut stream)?;
-
-        Ok(hash)
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        parse_server_message(&line)
     }
 }
 
@@ -522,39 +549,66 @@ where
         )
     }
 
-    fn read_message(&self, stream: impl Read) -> Result<String, ClientError> {
-        self.client.read_message(stream)
-    }
-
     /// Requests freechains server to send chain to other freechains peer.
-    pub fn send_chain(&mut self, id: &ChainId) -> Result<(), ClientError> {
+    pub fn send_chain(&mut self, id: &ChainId) -> Result<(usize, usize), ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         writeln!(stream, "{} send {}", self.preamble(), id)?;
 
-        self.read_message(&mut stream)?;
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let response = parse_server_message(&line)?;
 
-        Ok(())
+        let mut response_split = response.split('/');
+        let sent = response_split
+            .next()
+            .ok_or(ClientError::InvalidServerResponseError(response.clone()))?;
+        let sent = sent.trim().parse()?;
+        let total = response_split
+            .next()
+            .ok_or(ClientError::InvalidServerResponseError(response.clone()))?;
+        let total = total.trim().parse()?;
+
+        Ok((sent, total))
     }
 
     /// Requests freechains server to receive chain from other freechains peer.
-    pub fn receive_chain(&mut self, id: &ChainId) -> Result<(), ClientError> {
+    pub fn receive_chain(&mut self, id: &ChainId) -> Result<(usize, usize), ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         writeln!(stream, "{} recv {}", self.preamble(), id)?;
 
-        self.read_message(&mut stream)?;
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let response = parse_server_message(&line)?;
 
-        Ok(())
+        let mut response_split = response.split('/');
+        let recv = response_split
+            .next()
+            .ok_or(ClientError::InvalidServerResponseError(response.clone()))?;
+        let recv = recv.trim().parse()?;
+        let total = response_split
+            .next()
+            .ok_or(ClientError::InvalidServerResponseError(response.clone()))?;
+        let total = total.trim().parse()?;
+
+        Ok((recv, total))
     }
 
     /// Requests freechains server to ping other freechains peer.
-    pub fn ping(&mut self) -> Result<(), ClientError> {
+    ///
+    /// Returns ping time in milliseconds.
+    pub fn ping(&mut self) -> Result<usize, ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         writeln!(stream, "{} ping", self.preamble())?;
-        self.read_message(&mut stream)?;
-        Ok(())
+
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let response = parse_server_message(&line)?;
+        let ping = response.parse()?;
+
+        Ok(ping)
     }
 
     /// Requests freechains server to request other freechains peer for their chains.
@@ -563,7 +617,9 @@ where
 
         writeln!(stream, "{} chains", self.preamble())?;
 
-        let response = self.read_message(&mut stream)?;
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let response = parse_server_message(&line)?;
         let chains: Result<Vec<_>, _> = response.split(' ').map(ChainId::new).collect();
         let chains = chains?;
 
@@ -572,7 +628,7 @@ where
 }
 
 /// Type of freechains chain.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ChainType {
     /// Private chain. Identifier starts with `$`.
     PrivateChain,
@@ -614,7 +670,8 @@ impl From<&ChainType> for char {
     }
 }
 
-type ChainsIds = Vec<ChainId>;
+/// Vector of chain ids.
+pub type ChainsIds = Vec<ChainId>;
 
 /// Freechains chain identifier. Contains its type and name.
 #[derive(Debug, PartialEq, Eq)]
@@ -652,24 +709,26 @@ impl std::str::FromStr for ChainId {
 }
 
 /// Representation of freechains content block response. It is created from [content](ChainClient::content).
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ContentBlock {
     /// Content hash.
     pub hash: String,
     /// Content instant of creation. Milliseconds since [std::time::UNIX_EPOCH].
     pub time: usize,
     /// Content payload information.
+    #[serde(rename(serialize = "pay", deserialize = "pay"))]
     pub payload: Option<PayloadBlock>,
     /// If content is a like, like information is stored here.
     pub like: Option<LikeBlock>,
     /// Content signature information.
+    #[serde(rename(serialize = "sign", deserialize = "sign"))]
     pub signature: Option<SignatureBlock>,
     /// Blocks which points to this content block.
     pub backs: Vec<String>,
 }
 
 /// Representation of freechains payload field from content block response [ContentBlock].
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PayloadBlock {
     /// Payload hash.
     pub hash: String,
@@ -678,7 +737,7 @@ pub struct PayloadBlock {
 }
 
 /// Representation of freechains like field from content block response [ContentBlock].
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LikeBlock {
     /// Like hash.
     pub hash: String,
@@ -687,11 +746,12 @@ pub struct LikeBlock {
 }
 
 /// Representation of freechains signature field from content block response [ContentBlock].
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SignatureBlock {
     /// Signature hash.
     pub hash: String,
     /// Signature public key.
+    #[serde(rename(serialize = "pub", deserialize = "pub"))]
     pub pubkey: String,
 }
 
@@ -752,7 +812,7 @@ impl From<InvalidChainNameError> for ClientError {
 }
 
 /// Error returned when a chain is created with invalid name.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct InvalidChainNameError;
 
 impl Error for InvalidChainNameError {}
@@ -761,4 +821,32 @@ impl fmt::Display for InvalidChainNameError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "chain name must start with '$', '@' or '#'")
     }
+}
+
+fn read_utf8_line(mut stream: impl BufRead) -> io::Result<String> {
+    let mut line = String::new();
+    let size = stream.read_line(&mut line)?;
+    if size > 0 && line.chars().last().expect("must have last character") == '\n' {
+        line = String::from(&line[..size - 1]);
+    }
+
+    Ok(line)
+}
+
+fn parse_server_message(msg: &str) -> Result<String, ClientError> {
+    if msg.len() < 2 {
+        return Err(ClientError::EmptyResponseError);
+    }
+
+    let mut chars = msg.chars();
+
+    let first_char = chars.next();
+    if let Some(c) = first_char {
+        if c == '!' {
+            chars.next();
+            return Err(ClientError::ExecutionError(chars.collect()));
+        }
+    }
+
+    Ok(String::from(msg))
 }
