@@ -94,6 +94,7 @@ impl Connect for str {
         Ok(Box::new(TcpStream::connect(self)?))
     }
 }
+
 impl Connect for &str {
     fn connect(&self) -> io::Result<Box<dyn ReadWrite>> {
         Ok(Box::new(TcpStream::connect(self)?))
@@ -245,6 +246,11 @@ where
     /// Gets freechains peer client.
     pub fn peer(&mut self, peer: impl ToSocketAddrs) -> io::Result<PeerClient<T>> {
         PeerClient::new(self, peer)
+    }
+
+    /// Gets freechains host client.
+    pub fn host(&self) -> HostClient<T> {
+        HostClient::new(self)
     }
 }
 
@@ -624,6 +630,116 @@ where
         let chains = chains?;
 
         Ok(chains)
+    }
+}
+
+/// Freechains host client actions. Must be created from [Client].
+///
+/// # Examples
+///
+/// Opens host client from server `host:8330` and gets server time in milliseconds from Epoch.
+///
+/// ```no_run
+/// use freechains::{Client, ClientError};
+///
+/// # fn main() -> Result<(), ClientError> {
+/// let mut client = Client::new("host:8330");
+/// let mut client = client.host();
+/// let time = client.time()?;
+///
+/// # Ok(())
+/// # }
+/// ```
+pub struct HostClient<'a, T> {
+    client: &'a Client<T>,
+}
+
+impl<'a, T> HostClient<'a, T>
+where
+    T: Connect,
+{
+    fn new(client: &'a Client<T>) -> HostClient<'a, T> {
+        HostClient { client }
+    }
+
+    fn preamble(&self) -> String {
+        format!("{} host", self.client.preamble())
+    }
+
+    /// Requests freechains server its internal timer.
+    ///
+    /// Returns milliseconds from Epoch time.
+    pub fn time(&self) -> Result<usize, ClientError> {
+        let mut stream = self.client.connector.connect()?;
+
+        writeln!(stream, "{} now", self.preamble())?;
+
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let response = parse_server_message(&line)?;
+        let time = response.parse()?;
+
+        Ok(time)
+    }
+
+    /// Requests freechains server to change its internal timer.
+    ///
+    /// `milli` is the time to be set on the server, as milliseconds from Epoch time.
+    ///
+    /// # Examples
+    ///
+    /// Set server time to 1970-01-01T00:00.0Z.
+    ///
+    /// ```no_run
+    /// use freechains::{Client, ClientError};
+    ///
+    /// # fn main() -> Result<(), ClientError> {
+    /// let mut client = Client::new("host:8330");
+    /// let mut client = client.host();
+    /// let time = client.set_time(0)?;
+    ///
+    /// # Ok(())
+    /// # }
+    ///
+    /// ```
+    pub fn set_time(&self, milli: usize) -> Result<usize, ClientError> {
+        let mut stream = self.client.connector.connect()?;
+
+        writeln!(stream, "{} now {}", self.preamble(), milli)?;
+
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let response = parse_server_message(&line)?;
+        let time = response.parse()?;
+
+        Ok(time)
+    }
+
+    /// Requests freechains server path.
+    pub fn path(&self) -> Result<String, ClientError> {
+        let mut stream = self.client.connector.connect()?;
+
+        writeln!(stream, "{} path", self.preamble())?;
+
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let path = parse_server_message(&line)?;
+
+        Ok(path)
+    }
+
+    /// Requests freechains server to stop itself.
+    pub fn stop(self) -> Result<bool, ClientError> {
+        let mut stream = self.client.connector.connect()?;
+
+        writeln!(stream, "{} stop", self.preamble())?;
+
+        let r = BufReader::new(stream);
+        let line = read_utf8_line(r)?;
+        let stopped = parse_server_message(&line)?;
+        let stopped = stopped == "true";
+
+        Ok(stopped)
     }
 }
 
@@ -1350,6 +1466,74 @@ mod test {
 
         let exp_received = (5, 8);
         assert_eq!(received, exp_received);
+
+        Ok(())
+    }
+
+    #[test]
+    fn host_get_time() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let client = Client::new(mock);
+
+        let response = b"1635310954\n";
+        w.replace(response.to_vec());
+
+        let time = client.host().time()?;
+
+        let exp_time = 1635310954;
+        assert_eq!(time, exp_time);
+
+        Ok(())
+    }
+
+    #[test]
+    fn host_set_time() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let client = Client::new(mock);
+
+        let response = b"1635310954\n";
+        w.replace(response.to_vec());
+
+        let time = client.host().set_time(1635310954)?;
+
+        let exp_time = 1635310954;
+        assert_eq!(time, exp_time);
+
+        Ok(())
+    }
+
+    #[test]
+    fn host_path() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let client = Client::new(mock);
+
+        let response = b"/tmp/freechains\n";
+        w.replace(response.to_vec());
+
+        let path = client.host().path()?;
+
+        let exp_path = std::str::from_utf8(&response[..response.len() - 1]).unwrap();
+        assert_eq!(path, exp_path);
+
+        Ok(())
+    }
+
+    #[test]
+    fn host_stop() -> Result<(), Box<dyn Error>> {
+        let mock = ConnectorMock::new();
+        let w = mock.read_stream();
+        let client = Client::new(mock);
+
+        let response = b"true\n";
+        w.replace(response.to_vec());
+
+        let stopped = client.host().stop()?;
+
+        let exp_stopped = true;
+        assert_eq!(stopped, exp_stopped);
 
         Ok(())
     }
