@@ -10,7 +10,7 @@
 //! use freechains::{Client, ClientError};
 //!
 //! # fn main() -> Result<(), ClientError> {
-//! let mut client = Client::new("0.0.0.0:8300");
+//! let client = Client::new("0.0.0.0:8300");
 //! let chain_ids = client.chains()?;
 //! # Ok(())
 //! # }
@@ -22,7 +22,7 @@
 //! use freechains::{Client, ChainId, ClientError};
 //!
 //! # fn main() -> Result<(), ClientError> {
-//! let mut client = Client::new("0.0.0.0:8300");
+//! let client = Client::new("0.0.0.0:8300");
 //!
 //! // Join public chain
 //! let chain_id = ChainId::new("#forum")?;
@@ -33,7 +33,7 @@
 //! // Generate public and private keys
 //! let (pubkey, pvtkey) = client.crypto_pubpvt("strong_password")?;
 //!
-//! let mut chain_client = client.chain(&chain_id);
+//! let chain_client = client.chain(&chain_id);
 //!
 //! // Post on public chain
 //! chain_client.post(Some(&pvtkey), false, b"Hello, forum!")?;
@@ -168,7 +168,7 @@ where
     }
 
     /// Requests freechains server for a symmetric encryption for password `pwd`.
-    pub fn crypto_shared(&mut self, pwd: &str) -> Result<String, ClientError> {
+    pub fn crypto_shared(&self, pwd: &str) -> Result<String, ClientError> {
         let mut stream = self.connector.connect()?;
 
         writeln!(stream, "{} crypto shared", self.preamble())?;
@@ -180,7 +180,7 @@ where
     }
 
     /// Requests freechains server to generate public and private key with password `pwd`.
-    pub fn crypto_pubpvt(&mut self, pwd: &str) -> Result<(String, String), ClientError> {
+    pub fn crypto_pubpvt(&self, pwd: &str) -> Result<(String, String), ClientError> {
         let mut stream = self.connector.connect()?;
 
         writeln!(stream, "{} crypto pubpvt", self.preamble())?;
@@ -202,7 +202,7 @@ where
     }
 
     /// Requests freechains server for a list of subscribed chains.
-    pub fn chains(&mut self) -> Result<ChainsIds, ClientError> {
+    pub fn chains(&self) -> Result<ChainsIds, ClientError> {
         let mut stream = self.connector.connect()?;
 
         writeln!(stream, "{} chains list", self.preamble())?;
@@ -220,7 +220,7 @@ where
     /// Requests freechains server to join private chain with creators defined by keys.
     ///
     /// Returns created chain hash.
-    pub fn join_chain(&mut self, chain: &ChainId, keys: &[&str]) -> Result<String, ClientError> {
+    pub fn join_chain(&self, chain: &ChainId, keys: &[&str]) -> Result<String, ClientError> {
         let mut stream = self.connector.connect()?;
 
         writeln!(
@@ -239,12 +239,12 @@ where
     }
 
     /// Gets freechains chain client.
-    pub fn chain(&mut self, chain: &ChainId) -> ChainClient<T> {
+    pub fn chain(&self, chain: &ChainId) -> ChainClient<T> {
         ChainClient::new(self, &chain.to_string())
     }
 
     /// Gets freechains peer client.
-    pub fn peer(&mut self, peer: impl ToSocketAddrs) -> io::Result<PeerClient<T>> {
+    pub fn peer(&self, peer: impl ToSocketAddrs) -> io::Result<PeerClient<T>> {
         PeerClient::new(self, peer)
     }
 
@@ -264,17 +264,17 @@ where
 /// # use freechains::{Client, ChainId, ClientError};
 ///
 /// # fn main() -> Result<(), ClientError> {
-/// let mut client = Client::new("0.0.0.0:8300");
+/// let client = Client::new("0.0.0.0:8300");
 /// let chain_id = ChainId::new("$chat")?;
 ///
-/// let mut client = client.chain(&chain_id);
+/// let client = client.chain(&chain_id);
 /// let genesis_hash = client.genesis();
 ///
 /// # Ok(())
 /// # }
 /// ```
 pub struct ChainClient<'a, T> {
-    client: &'a mut Client<T>,
+    client: &'a Client<T>,
     name: String,
 }
 
@@ -282,7 +282,7 @@ impl<'a, T> ChainClient<'a, T>
 where
     T: Connect,
 {
-    fn new(client: &'a mut Client<T>, name: &str) -> ChainClient<'a, T> {
+    fn new(client: &'a Client<T>, name: &str) -> ChainClient<'a, T> {
         let name = String::from(name);
         ChainClient { client, name }
     }
@@ -316,7 +316,7 @@ where
     }
 
     /// Requests freechains for the hash of genesis.
-    pub fn genesis(&mut self) -> Result<String, ClientError> {
+    pub fn genesis(&self) -> Result<String, ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         writeln!(stream, "{} genesis", self.preamble())?;
@@ -328,7 +328,7 @@ where
 
     /// Requests freechains server for a payload for the specified post. Post must be identified by
     /// its hash.
-    pub fn payload(&mut self, hash: &str, pvtkey: Option<&str>) -> Result<Vec<u8>, ClientError> {
+    pub fn payload(&self, hash: &str, pvtkey: Option<&str>) -> Result<Vec<u8>, ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         let pvtkey = pvtkey.unwrap_or("null");
@@ -352,11 +352,7 @@ where
     }
 
     /// Requests freechains server for a block of content. Content must be identified by its hash.
-    pub fn content(
-        &mut self,
-        hash: &str,
-        pvtkey: Option<&str>,
-    ) -> Result<ContentBlock, ClientError> {
+    pub fn content(&self, hash: &str, pvtkey: Option<&str>) -> Result<ContentBlock, ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         let pvtkey = pvtkey.unwrap_or("null");
@@ -379,7 +375,7 @@ where
     ///
     /// Returns message hash.
     pub fn post(
-        &mut self,
+        &self,
         signature: Option<&str>,
         encrypt: bool,
         payload: &[u8],
@@ -404,7 +400,7 @@ where
     }
 
     /// Requests freechains server to get chain heads.
-    pub fn heads(&mut self, blocked: bool) -> Result<Vec<String>, ClientError> {
+    pub fn heads(&self, blocked: bool) -> Result<Vec<String>, ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         let mut msg = String::from("heads");
@@ -423,7 +419,7 @@ where
 
     /// Requests freechains server to traverse all messages hashes starting with required messages
     /// hashes.
-    pub fn traverse(&mut self, up_blocks: &[&str]) -> Result<Vec<String>, ClientError> {
+    pub fn traverse(&self, up_blocks: &[&str]) -> Result<Vec<String>, ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         writeln!(
@@ -444,7 +440,7 @@ where
     /// Requests freechains server for content reputation.
     ///
     /// Accepts either a post hash, or an user public key.
-    pub fn reputation(&mut self, hash: &str) -> Result<usize, ClientError> {
+    pub fn reputation(&self, hash: &str) -> Result<usize, ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         writeln!(stream, "{} reps {}", self.preamble(), hash)?;
@@ -458,7 +454,7 @@ where
     }
 
     /// Requests freechains server to give content a like.
-    pub fn like(&mut self, hash: &str, pvtkey: &str, reason: &[u8]) -> Result<String, ClientError> {
+    pub fn like(&self, hash: &str, pvtkey: &str, reason: &[u8]) -> Result<String, ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         writeln!(
@@ -477,12 +473,7 @@ where
     }
 
     /// Requests freechains server to give content a dislike.
-    pub fn dislike(
-        &mut self,
-        hash: &str,
-        pvtkey: &str,
-        reason: &[u8],
-    ) -> Result<String, ClientError> {
+    pub fn dislike(&self, hash: &str, pvtkey: &str, reason: &[u8]) -> Result<String, ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         writeln!(
@@ -523,15 +514,15 @@ impl<T> fmt::Debug for ChainClient<'_, T> {
 /// use freechains::{Client, ClientError};
 ///
 /// # fn main() -> Result<(), ClientError> {
-/// let mut client = Client::new("host1:8330");
-/// let mut client = client.peer("host2:8330")?;
+/// let client = Client::new("host1:8330");
+/// let client = client.peer("host2:8330")?;
 /// let chains = client.chains()?;
 ///
 /// # Ok(())
 /// # }
 /// ```
 pub struct PeerClient<'a, T> {
-    client: &'a mut Client<T>,
+    client: &'a Client<T>,
     peer: SocketAddr,
 }
 
@@ -539,7 +530,7 @@ impl<'a, T> PeerClient<'a, T>
 where
     T: Connect,
 {
-    fn new(client: &'a mut Client<T>, peer: impl ToSocketAddrs) -> io::Result<PeerClient<'a, T>> {
+    fn new(client: &'a Client<T>, peer: impl ToSocketAddrs) -> io::Result<PeerClient<'a, T>> {
         let mut peer = peer.to_socket_addrs()?;
         let peer = peer.next().unwrap_or("0.0.0.0:8330".parse().unwrap());
 
@@ -556,7 +547,7 @@ where
     }
 
     /// Requests freechains server to send chain to other freechains peer.
-    pub fn send_chain(&mut self, id: &ChainId) -> Result<(usize, usize), ClientError> {
+    pub fn send_chain(&self, id: &ChainId) -> Result<(usize, usize), ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         writeln!(stream, "{} send {}", self.preamble(), id)?;
@@ -579,7 +570,7 @@ where
     }
 
     /// Requests freechains server to receive chain from other freechains peer.
-    pub fn receive_chain(&mut self, id: &ChainId) -> Result<(usize, usize), ClientError> {
+    pub fn receive_chain(&self, id: &ChainId) -> Result<(usize, usize), ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         writeln!(stream, "{} recv {}", self.preamble(), id)?;
@@ -604,7 +595,7 @@ where
     /// Requests freechains server to ping other freechains peer.
     ///
     /// Returns ping time in milliseconds.
-    pub fn ping(&mut self) -> Result<usize, ClientError> {
+    pub fn ping(&self) -> Result<usize, ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         writeln!(stream, "{} ping", self.preamble())?;
@@ -618,7 +609,7 @@ where
     }
 
     /// Requests freechains server to request other freechains peer for their chains.
-    pub fn chains(&mut self) -> Result<ChainsIds, ClientError> {
+    pub fn chains(&self) -> Result<ChainsIds, ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         writeln!(stream, "{} chains", self.preamble())?;
@@ -643,8 +634,8 @@ where
 /// use freechains::{Client, ClientError};
 ///
 /// # fn main() -> Result<(), ClientError> {
-/// let mut client = Client::new("host:8330");
-/// let mut client = client.host();
+/// let client = Client::new("host:8330");
+/// let client = client.host();
 /// let time = client.time()?;
 ///
 /// # Ok(())
@@ -694,8 +685,8 @@ where
     /// use freechains::{Client, ClientError};
     ///
     /// # fn main() -> Result<(), ClientError> {
-    /// let mut client = Client::new("host:8330");
-    /// let mut client = client.host();
+    /// let client = Client::new("host:8330");
+    /// let client = client.host();
     /// let time = client.set_time(0)?;
     ///
     /// # Ok(())
@@ -1055,7 +1046,7 @@ mod test {
     fn crypto_shared() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let response = b"707E8334560C3FB2852CCCE11F9221FA3594B7DE3919A8BAA5B6DB90FE432E53\n";
         w.replace(response.to_vec());
@@ -1070,7 +1061,7 @@ mod test {
     fn crypto_pubpvt() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let response = b"646AABC0D78E87574FFCD2E98FF14B08C76D424C7A0ED783CB7B840117A403E3 \
                        707E8334560C3FB2852CCCE11F9221FA3594B7DE3919A8BAA5B6DB90FE432E53646AABC0D78E87574FFCD2E98FF14B08C76D424C7A0ED783CB7B840117A403E3\n";
@@ -1090,7 +1081,7 @@ mod test {
     fn chains_join() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let chain_id = ChainId::new("$chat")?;
         let pwd_hash = "707E8334560C3FB2852CCCE11F9221FA3594B7DE3919A8BAA5B6DB90FE432E53";
@@ -1109,7 +1100,7 @@ mod test {
     fn chains_list() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let response = b"$chain1 $chain2 #chain3 @chain4\n";
         w.replace(response.to_vec());
@@ -1130,7 +1121,7 @@ mod test {
     fn chain_leave() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let chain_id = ChainId::new("$chat").unwrap();
 
@@ -1147,7 +1138,7 @@ mod test {
     fn chain_leave_failed() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let chain_id = ChainId::new("$chat").unwrap();
 
@@ -1164,7 +1155,7 @@ mod test {
     fn chain_genesis() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let chain_id = ChainId::new("$chat").unwrap();
 
@@ -1182,7 +1173,7 @@ mod test {
     fn chain_heads() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let chain_id = ChainId::new("$chat").unwrap();
 
@@ -1205,7 +1196,7 @@ mod test {
     fn chain_payload() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let chain_id = ChainId::new("$chat").unwrap();
 
@@ -1228,7 +1219,7 @@ mod test {
     fn chain_content_block() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let chain_id = ChainId::new("$chat").unwrap();
         let response = br#"710
@@ -1284,7 +1275,7 @@ mod test {
     fn chain_post() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let chain_id = ChainId::new("$chat").unwrap();
 
@@ -1302,7 +1293,7 @@ mod test {
     fn chain_like() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let chain_id = ChainId::new("$chat").unwrap();
 
@@ -1324,7 +1315,7 @@ mod test {
     fn chain_dislike() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let chain_id = ChainId::new("$chat").unwrap();
 
@@ -1346,7 +1337,7 @@ mod test {
     fn chain_reputation() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let chain_id = ChainId::new("$chat").unwrap();
 
@@ -1366,7 +1357,7 @@ mod test {
     fn chain_traverse() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let chain_id = ChainId::new("$chat").unwrap();
 
@@ -1392,7 +1383,7 @@ mod test {
     fn peer_ping() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let fake_peer = "1.2.3.4:8330";
 
@@ -1411,7 +1402,7 @@ mod test {
     fn peer_chains_list() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let fake_peer = "1.2.3.4:8330";
 
@@ -1434,7 +1425,7 @@ mod test {
     fn peer_send() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let fake_peer = "1.2.3.4:8330";
         let chain_id = ChainId::new("#forum").unwrap();
@@ -1454,7 +1445,7 @@ mod test {
     fn peer_receive() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
-        let mut client = Client::new(mock);
+        let client = Client::new(mock);
 
         let fake_peer = "1.2.3.4:8330";
         let chain_id = ChainId::new("#forum").unwrap();
