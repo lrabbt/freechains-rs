@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Migrate support to server version `v0.9.0`.
+
+## [0.2.0] - 2021-10-29
+
+### Added
+
 - Request to create listener on a chain.
 - Request to create listener on chains list.
 
@@ -32,5 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Request external peer chain send.
 - Request external peer chain receive.
 
-[Unreleased]: https://github.com/lrabbt/freechains-rs/compare/v0.1.0...master
+[Unreleased]: https://github.com/lrabbt/freechains-rs/compare/v0.2.0...master
+[0.2.0]: https://github.com/lrabbt/freechains-rs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/lrabbt/freechains-rs/releases/tag/v0.1.0

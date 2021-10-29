@@ -1,6 +1,7 @@
 # freechains-rs
 
 A [Freechains](https://github.com/Freechains) client rust library.
+Compatible with Freechains server version `v0.8.6`.
 
 ## Objective
 
