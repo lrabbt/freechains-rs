@@ -398,10 +398,7 @@ pub struct ChainClient<'a, T> {
     name: String,
 }
 
-impl<'a, T> ChainClient<'a, T>
-where
-    T: Connect,
-{
+impl<'a, T> ChainClient<'a, T> {
     fn new(client: &'a Client<T>, name: &str) -> ChainClient<'a, T> {
         let name = String::from(name);
         ChainClient { client, name }
@@ -410,7 +407,12 @@ where
     fn preamble(&self) -> String {
         format!("{} chain {}", self.client.preamble(), self.name)
     }
+}
 
+impl<'a, T> ChainClient<'a, T>
+where
+    T: Connect,
+{
     /// Returns chain name.
     pub fn name(&self) -> &str {
         &self.name
@@ -609,6 +611,94 @@ where
         let r = BufReader::new(stream);
         let line = read_utf8_line(r)?;
         parse_server_message(&line)
+    }
+}
+
+impl<T> ChainClient<'_, T>
+where
+    T: 'static + Connect + Clone + Send,
+{
+    /// Requests freechains server to notify when the chain has been modified.
+    ///
+    /// Returns [Receiver] thet emits the number of posts modified on the chain.
+    ///
+    /// # Examples
+    ///
+    /// Receive a chain update.
+    ///
+    /// ```no_run
+    /// # use std::error::Error;
+    /// # use std::time::Duration;
+    /// use freechains::{Client, ChainId};
+    ///
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// let client = Client::new("host:8330");
+    ///
+    /// let chain_id = ChainId::new("#forum")?;
+    /// let listener = client.chain(&chain_id).listen();
+    ///
+    /// let updates = listener.recv_timeout(Duration::from_millis(100))??;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Keep listening to chain changes.
+    ///
+    /// ```no_run
+    /// # use std::error::Error;
+    /// use freechains::{Client, ChainId};
+    ///
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// let client = Client::new("host:8330");
+    ///
+    /// let chain_id = ChainId::new("#forum")?;
+    /// let listener = client.chain(&chain_id).listen();
+    ///
+    /// for recv in listener {
+    ///     let updates = recv?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn listen(&self) -> Receiver<Result<usize, ClientError>> {
+        let (tx, rx) = mpsc::channel();
+
+        let connector = self.client.connector.clone();
+        let preamble = self.preamble();
+        thread::spawn(move || match connector.connect() {
+            Err(e) => tx.send(Err(ClientError::IoError(e))),
+            Ok(mut stream) => match writeln!(stream, "{} listen", preamble) {
+                Err(e) => tx.send(Err(ClientError::IoError(e))),
+                Ok(_) => {
+                    let r = BufReader::new(stream);
+                    for line in r.lines() {
+                        match line {
+                            Err(e) => {
+                                tx.send(Err(ClientError::IoError(e)))?;
+                                break;
+                            }
+                            Ok(line) => {
+                                let updated = match line.parse() {
+                                    Err(e) => {
+                                        tx.send(Err(ClientError::InvalidServerResponseError(
+                                            format!("invalid updated number: {}", e),
+                                        )))?;
+                                        continue;
+                                    }
+                                    Ok(updated) => updated,
+                                };
+
+                                tx.send(Ok(updated))?;
+                            }
+                        }
+                    }
+
+                    Ok(())
+                }
+            },
+        });
+
+        rx
     }
 }
 
@@ -1576,6 +1666,31 @@ mod test {
             .map(String::from)
             .collect();
         assert_eq!(hashes, exp_hahses);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chain_listen() -> Result<(), Box<dyn Error>> {
+        let response = b"9\n6\n7\n9\n";
+        let mock = SyncConnectorMock::new(response);
+        let client = Client::new(mock);
+
+        let chain_id = ChainId::new("#forum").unwrap();
+
+        let listener = client.chain(&chain_id).listen();
+
+        let updates = listener.recv_timeout(Duration::new(1, 0))??;
+        assert_eq!(updates, 9);
+
+        let updates = listener.recv_timeout(Duration::new(1, 0))??;
+        assert_eq!(updates, 6);
+
+        let updates = listener.recv_timeout(Duration::new(1, 0))??;
+        assert_eq!(updates, 7);
+
+        let updates = listener.recv_timeout(Duration::new(1, 0))??;
+        assert_eq!(updates, 9);
 
         Ok(())
     }
