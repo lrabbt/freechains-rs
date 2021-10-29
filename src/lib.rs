@@ -296,6 +296,14 @@ where
                                 break;
                             }
                             Ok(line) => {
+                                let line = match parse_server_message(&line) {
+                                    Err(e) => {
+                                        tx.send(Err(e))?;
+                                        continue;
+                                    }
+                                    Ok(line) => line,
+                                };
+
                                 let mut line_split = line.split_whitespace();
 
                                 let updated = match line_split.next() {
@@ -654,6 +662,14 @@ where
                                 break;
                             }
                             Ok(line) => {
+                                let line = match parse_server_message(&line) {
+                                    Err(e) => {
+                                        tx.send(Err(e))?;
+                                        continue;
+                                    }
+                                    Ok(line) => line,
+                                };
+
                                 let updated = match line.parse() {
                                     Err(e) => {
                                         tx.send(Err(ClientError::InvalidServerResponseError(
@@ -1127,7 +1143,7 @@ fn read_utf8_line(mut stream: impl BufRead) -> io::Result<String> {
 }
 
 fn parse_server_message(msg: &str) -> Result<String, ClientError> {
-    if msg.len() < 2 {
+    if msg.len() == 0 {
         return Err(ClientError::EmptyResponseError);
     }
 
