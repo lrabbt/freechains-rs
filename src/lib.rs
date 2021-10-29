@@ -1,5 +1,5 @@
 //! The `freechains` module implements freechains client utilities for
-//! [Freechains server](https://github.com/Freechains) version `v0.8.6`.
+//! [Freechains server](https://github.com/Freechains) version `v0.9.0`.
 //!
 //! Main use comes from [Client] struct.
 //!
@@ -57,7 +57,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 /// Freechains host version supported.
-pub const HOST_VERSION: (u8, u8, u8) = (0, 8, 6);
+pub const HOST_VERSION: (u8, u8, u8) = (0, 9, 0);
 
 /// A trait for objects that implements [Read] and [Write].
 pub trait ReadWrite: Read + Write {}
@@ -523,17 +523,11 @@ where
         Ok(hashes)
     }
 
-    /// Requests freechains server to traverse all messages hashes starting with required messages
-    /// hashes.
-    pub fn traverse(&self, up_blocks: &[&str]) -> Result<Vec<String>, ClientError> {
+    /// Requests freechains server to return its consensus chain.
+    pub fn consensus(&self) -> Result<Vec<String>, ClientError> {
         let mut stream = self.client.connector.connect()?;
 
-        writeln!(
-            stream,
-            "{} traverse {}",
-            self.preamble(),
-            up_blocks.join(" ")
-        )?;
+        writeln!(stream, "{} consensus", self.preamble(),)?;
 
         let r = BufReader::new(stream);
         let line = read_utf8_line(r)?;
@@ -1637,7 +1631,7 @@ mod test {
     }
 
     #[test]
-    fn chain_traverse() -> Result<(), Box<dyn Error>> {
+    fn chain_consensus() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
         let w = mock.read_stream();
         let client = Client::new(mock);
@@ -1649,8 +1643,7 @@ mod test {
                        3_3D9997F5D8A57B26B7DEC3BCDFD3A12EAE48C585DFC287FE9DE522E44A96DB46\n";
         w.replace(response.to_vec());
 
-        let fake_hash = "0_9B144EE0518E5DE01D4C1AABD469D85315715CB15F77AB4B3D87D7802EE970E6";
-        let hashes = client.chain(&chain_id).traverse(&[fake_hash])?;
+        let hashes = client.chain(&chain_id).consensus()?;
 
         let exp_hahses: Vec<_> = std::str::from_utf8(&response[..response.len() - 1])
             .unwrap()
