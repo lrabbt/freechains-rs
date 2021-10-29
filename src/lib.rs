@@ -1,4 +1,5 @@
-//! The `freechains` module implements freechains client utilities.
+//! The `freechains` module implements freechains client utilities for
+//! [Freechains server](https://github.com/Freechains) version `v0.8.6`.
 //!
 //! Main use comes from [Client] struct.
 //!
@@ -40,31 +41,6 @@
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! # Roadmap
-//!
-//! | STATUS   | COMMAND                                                   |
-//! |----------|-----------------------------------------------------------|
-//! | DONE     | `crypto pubprv $pwd`                                      |
-//! | DONE     | `crypto share $pwd`                                       |
-//! | DONE     | `peer $remote ping`                                       |
-//! | DONE     | `peer $remote chains`                                     |
-//! | DONE     | `peer $remote send $chain`                                |
-//! | DONE     | `peer $remote recv $chain`                                |
-//! | DONE     | `chains list`                                             |
-//! | DONE     | `chains leave $chain`                                     |
-//! | DONE     | `chains join $chain $keys[@]`                             |
-//! | DONE     | `chains join $chain`                                      |
-//! | **TODO** | `chains listen`                                           |
-//! | DONE     | `chain $chain like $lk ${cmds[3]} ${opts["--sign"]} $len` |
-//! | DONE     | `chain $chain genesis`                                    |
-//! | DONE     | `chain $chain heads [blocked]`                            |
-//! | DONE     | `chain $chain get block $hash $decrypt (?)`               |
-//! | DONE     | `chain $chain get payload $hash $decrypt (?)`             |
-//! | DONE     | `chain $chain post $sign $encrypt ${pay.size}`            |
-//! | DONE     | `chain $chain traverse $downto`                           |
-//! | DONE     | `chain $chain reps ${cmds[3]}`                            |
-//! | **TODO** | `chain $chain listen`                                     |
 
 #![warn(missing_docs)]
 
@@ -77,6 +53,9 @@ use std::io::prelude::*;
 use std::io::{self, BufReader};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::num;
+
+/// Freechains host version supported.
+pub const HOST_VERSION: (u8, u8, u8) = (0, 8, 6);
 
 /// A trait for objects that implements [Read] and [Write].
 pub trait ReadWrite: Read + Write {}
@@ -129,9 +108,6 @@ where
         Ok(Box::new(stream))
     }
 }
-
-/// Freechains host version supported.
-pub const HOST_VERSION: (u8, u8, u8) = (0, 8, 6);
 
 /// Freechains client. For more usage examples, check [module documentation](self),
 ///
