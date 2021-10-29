@@ -53,6 +53,8 @@ use std::io::prelude::*;
 use std::io::{self, BufReader};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::num;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 
 /// Freechains host version supported.
 pub const HOST_VERSION: (u8, u8, u8) = (0, 8, 6);
@@ -127,10 +129,7 @@ pub struct Client<T> {
     connector: T,
 }
 
-impl<T> Client<T>
-where
-    T: Connect,
-{
+impl<T> Client<T> {
     /// Creates a freechains client.
     pub fn new(connector: T) -> Client<T> {
         Client { connector }
@@ -142,7 +141,12 @@ where
             HOST_VERSION.0, HOST_VERSION.1, HOST_VERSION.2
         )
     }
+}
 
+impl<T> Client<T>
+where
+    T: Connect,
+{
     /// Requests freechains server for a symmetric encryption for password `pwd`.
     pub fn crypto_shared(&self, pwd: &str) -> Result<String, ClientError> {
         let mut stream = self.connector.connect()?;
@@ -230,6 +234,122 @@ where
     }
 }
 
+impl<T> Client<T>
+where
+    T: 'static + Connect + Send + Clone,
+{
+    /// Requests freechains server to notify when any chain has been modified.
+    ///
+    /// Returns [Receiver] thet emits the number of posts and the [ChainId] of the modified chain.
+    ///
+    /// # Examples
+    ///
+    /// Receive a chain update.
+    ///
+    /// ```no_run
+    /// # use std::error::Error;
+    /// # use std::time::Duration;
+    /// use freechains::Client;
+    ///
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// let client = Client::new("host:8330");
+    ///
+    /// let listener = client.listen();
+    ///
+    /// let (updates, chain) = listener.recv_timeout(Duration::from_millis(100))??;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Keep listening to server.
+    ///
+    /// ```no_run
+    /// # use std::error::Error;
+    /// use freechains::Client;
+    ///
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// let client = Client::new("host:8330");
+    ///
+    /// let listener = client.listen();
+    ///
+    /// for recv in listener {
+    ///     let (updates, chain) = recv?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn listen(&self) -> Receiver<Result<(usize, ChainId), ClientError>> {
+        let (tx, rx) = mpsc::channel();
+
+        let connector = self.connector.clone();
+        let preamble = self.preamble();
+        thread::spawn(move || match connector.connect() {
+            Err(e) => tx.send(Err(ClientError::IoError(e))),
+            Ok(mut stream) => match writeln!(stream, "{} chains listen", preamble) {
+                Err(e) => tx.send(Err(ClientError::IoError(e))),
+                Ok(_) => {
+                    let r = BufReader::new(stream);
+                    for line in r.lines() {
+                        match line {
+                            Err(e) => {
+                                tx.send(Err(ClientError::IoError(e)))?;
+                                break;
+                            }
+                            Ok(line) => {
+                                let mut line_split = line.split_whitespace();
+
+                                let updated = match line_split.next() {
+                                    None => {
+                                        tx.send(Err(ClientError::InvalidServerResponseError(
+                                            String::from("empty updated number"),
+                                        )))?;
+                                        continue;
+                                    }
+                                    Some(updated) => updated,
+                                };
+                                let updated = match updated.parse() {
+                                    Err(e) => {
+                                        tx.send(Err(ClientError::InvalidServerResponseError(
+                                            format!("invalid updated number: {}", e),
+                                        )))?;
+                                        continue;
+                                    }
+                                    Ok(updated) => updated,
+                                };
+
+                                let chain_id = match line_split.next() {
+                                    None => {
+                                        tx.send(Err(ClientError::InvalidServerResponseError(
+                                            String::from("empty chain name"),
+                                        )))?;
+                                        continue;
+                                    }
+                                    Some(id) => id,
+                                };
+                                let chain_id = match ChainId::new(chain_id) {
+                                    Err(e) => {
+                                        tx.send(Err(ClientError::InvalidServerResponseError(
+                                            format!("invalid chain name: {}", e),
+                                        )))?;
+                                        continue;
+                                    }
+                                    Ok(chain_id) => chain_id,
+                                };
+
+                                tx.send(Ok((updated, chain_id)))?;
+                            }
+                        }
+                    }
+
+                    Ok(())
+                }
+            },
+        });
+
+        rx
+    }
+}
+
 /// Freechains chain client actions. Must be created from [Client].
 ///
 /// # Examples
@@ -254,10 +374,7 @@ pub struct ChainClient<'a, T> {
     name: String,
 }
 
-impl<'a, T> ChainClient<'a, T>
-where
-    T: Connect,
-{
+impl<'a, T> ChainClient<'a, T> {
     fn new(client: &'a Client<T>, name: &str) -> ChainClient<'a, T> {
         let name = String::from(name);
         ChainClient { client, name }
@@ -266,7 +383,12 @@ where
     fn preamble(&self) -> String {
         format!("{} chain {}", self.client.preamble(), self.name)
     }
+}
 
+impl<'a, T> ChainClient<'a, T>
+where
+    T: Connect,
+{
     /// Returns chain name.
     pub fn name(&self) -> &str {
         &self.name
@@ -465,6 +587,94 @@ where
         let r = BufReader::new(stream);
         let line = read_utf8_line(r)?;
         parse_server_message(&line)
+    }
+}
+
+impl<T> ChainClient<'_, T>
+where
+    T: 'static + Connect + Clone + Send,
+{
+    /// Requests freechains server to notify when the chain has been modified.
+    ///
+    /// Returns [Receiver] thet emits the number of posts modified on the chain.
+    ///
+    /// # Examples
+    ///
+    /// Receive a chain update.
+    ///
+    /// ```no_run
+    /// # use std::error::Error;
+    /// # use std::time::Duration;
+    /// use freechains::{Client, ChainId};
+    ///
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// let client = Client::new("host:8330");
+    ///
+    /// let chain_id = ChainId::new("#forum")?;
+    /// let listener = client.chain(&chain_id).listen();
+    ///
+    /// let updates = listener.recv_timeout(Duration::from_millis(100))??;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Keep listening to chain changes.
+    ///
+    /// ```no_run
+    /// # use std::error::Error;
+    /// use freechains::{Client, ChainId};
+    ///
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// let client = Client::new("host:8330");
+    ///
+    /// let chain_id = ChainId::new("#forum")?;
+    /// let listener = client.chain(&chain_id).listen();
+    ///
+    /// for recv in listener {
+    ///     let updates = recv?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn listen(&self) -> Receiver<Result<usize, ClientError>> {
+        let (tx, rx) = mpsc::channel();
+
+        let connector = self.client.connector.clone();
+        let preamble = self.preamble();
+        thread::spawn(move || match connector.connect() {
+            Err(e) => tx.send(Err(ClientError::IoError(e))),
+            Ok(mut stream) => match writeln!(stream, "{} listen", preamble) {
+                Err(e) => tx.send(Err(ClientError::IoError(e))),
+                Ok(_) => {
+                    let r = BufReader::new(stream);
+                    for line in r.lines() {
+                        match line {
+                            Err(e) => {
+                                tx.send(Err(ClientError::IoError(e)))?;
+                                break;
+                            }
+                            Ok(line) => {
+                                let updated = match line.parse() {
+                                    Err(e) => {
+                                        tx.send(Err(ClientError::InvalidServerResponseError(
+                                            format!("invalid updated number: {}", e),
+                                        )))?;
+                                        continue;
+                                    }
+                                    Ok(updated) => updated,
+                                };
+
+                                tx.send(Ok(updated))?;
+                            }
+                        }
+                    }
+
+                    Ok(())
+                }
+            },
+        });
+
+        rx
     }
 }
 
@@ -938,6 +1148,7 @@ fn parse_server_message(msg: &str) -> Result<String, ClientError> {
 mod test {
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::time::Duration;
 
     use super::*;
 
@@ -1018,6 +1229,63 @@ mod test {
         }
     }
 
+    #[derive(Debug)]
+    struct SyncConnectorMock(Vec<u8>);
+
+    impl SyncConnectorMock {
+        fn new(r: &[u8]) -> SyncConnectorMock {
+            SyncConnectorMock(r.to_vec())
+        }
+    }
+
+    impl Clone for SyncConnectorMock {
+        fn clone(&self) -> Self {
+            SyncConnectorMock(self.0.clone())
+        }
+    }
+
+    impl Connect for SyncConnectorMock {
+        fn connect(&self) -> io::Result<Box<dyn ReadWrite>> {
+            Ok(Box::new(SyncConnectionMock::new(&self.0)))
+        }
+    }
+
+    #[derive(Debug)]
+    struct SyncConnectionMock {
+        response: Vec<u8>,
+        sent: Vec<u8>,
+    }
+
+    impl SyncConnectionMock {
+        fn new(response: &[u8]) -> SyncConnectionMock {
+            let response = response.to_vec();
+            let sent = Vec::new();
+            SyncConnectionMock { response, sent }
+        }
+    }
+
+    impl ReadWrite for SyncConnectionMock {}
+
+    impl Read for SyncConnectionMock {
+        fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+            let mut a: &[u8] = &self.response;
+
+            let size = a.read(b)?;
+            self.response.drain(..size);
+            Ok(size)
+        }
+    }
+
+    impl Write for SyncConnectionMock {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.sent.write(b)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn crypto_shared() -> Result<(), Box<dyn Error>> {
         let mock = ConnectorMock::new();
@@ -1049,6 +1317,29 @@ mod test {
 
         let exp_pvtkey = "707E8334560C3FB2852CCCE11F9221FA3594B7DE3919A8BAA5B6DB90FE432E53646AABC0D78E87574FFCD2E98FF14B08C76D424C7A0ED783CB7B840117A403E3";
         assert_eq!(pvtkey, exp_pvtkey);
+
+        Ok(())
+    }
+
+    #[test]
+    fn listen() -> Result<(), Box<dyn Error>> {
+        let response = b"5 #forum\n10 #chat\n2 $family\n";
+        let mock = SyncConnectorMock::new(response);
+        let client = Client::new(mock);
+
+        let listener = client.listen();
+
+        let (updates, chain) = listener.recv_timeout(Duration::new(1, 0))??;
+        assert_eq!(updates, 5);
+        assert_eq!(chain, ChainId::new("#forum").unwrap());
+
+        let (updates, chain) = listener.recv_timeout(Duration::new(1, 0))??;
+        assert_eq!(updates, 10);
+        assert_eq!(chain, ChainId::new("#chat").unwrap());
+
+        let (updates, chain) = listener.recv_timeout(Duration::new(1, 0))??;
+        assert_eq!(updates, 2);
+        assert_eq!(chain, ChainId::new("$family").unwrap());
 
         Ok(())
     }
@@ -1351,6 +1642,31 @@ mod test {
             .map(String::from)
             .collect();
         assert_eq!(hashes, exp_hahses);
+
+        Ok(())
+    }
+
+    #[test]
+    fn chain_listen() -> Result<(), Box<dyn Error>> {
+        let response = b"9\n6\n7\n9\n";
+        let mock = SyncConnectorMock::new(response);
+        let client = Client::new(mock);
+
+        let chain_id = ChainId::new("#forum").unwrap();
+
+        let listener = client.chain(&chain_id).listen();
+
+        let updates = listener.recv_timeout(Duration::new(1, 0))??;
+        assert_eq!(updates, 9);
+
+        let updates = listener.recv_timeout(Duration::new(1, 0))??;
+        assert_eq!(updates, 6);
+
+        let updates = listener.recv_timeout(Duration::new(1, 0))??;
+        assert_eq!(updates, 7);
+
+        let updates = listener.recv_timeout(Duration::new(1, 0))??;
+        assert_eq!(updates, 9);
 
         Ok(())
     }
