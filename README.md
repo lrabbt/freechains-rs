@@ -1,4 +1,7 @@
-# freechains-rs
+# freechains-rs [![Latest Version]][crates.io]
+
+[Latest Version]: https://img.shields.io/crates/v/freechains
+[crates.io]: https://crates.io/crates/freechains
 
 A [Freechains](https://github.com/Freechains) client rust library.
 Compatible with Freechains server version `v0.9.0`.
