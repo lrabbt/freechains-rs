@@ -540,7 +540,7 @@ where
     /// Requests freechains server for content reputation.
     ///
     /// Accepts either a post hash, or an user public key.
-    pub fn reputation(&self, hash: &str) -> Result<usize, ClientError> {
+    pub fn reputation(&self, hash: &str) -> Result<isize, ClientError> {
         let mut stream = self.client.connector.connect()?;
 
         writeln!(stream, "{} reps {}", self.preamble(), hash)?;
